@@ -35,6 +35,13 @@ jobs:
     - name: Generate Xcode project
       run: xcodegen generate
 
+    - name: Patch Info.plist build number
+      run: |
+        sed -i "" "s|<string>\$(CURRENT_PROJECT_VERSION)</string>|<string>$BUILD_NUM</string>|" FutsunoNews/Info.plist
+        sed -i "" "/<key>CFBundleVersion<\/key>/{n;s|<string>[^<]*</string>|<string>$BUILD_NUM</string>|;}" FutsunoNews/Info.plist
+        echo "Info.plist after patch:"
+        grep -A1 CFBundleVersion FutsunoNews/Info.plist
+
     - name: Import Distribution Certificate
       env:
         CERT_BASE64: ${{ secrets.DIST_CERT_BASE64 }}

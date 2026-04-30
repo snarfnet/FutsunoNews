@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"# Try to scp the cert - Mac Mini might have exported it before\\nssh user@192.168.3.34 \\\"ls /tmp/dist_cert* 2>/dev/null; ls ~/dist_cert* 2>/dev/null; ls ~/Downloads/*.p12 2>/dev/null\\\" 2>&1...",
+  "error": "Exit code 1\n/tmp/dist_cert.p12\nzsh:1: no matches found: /Users/user/dist_cert*\nzsh:1: no matches found: /Users/user/Downloads/*.p12",
+  "timestamp": "2026-04-30T01:32:15.343Z",
+  "retry_count": 1
+}
