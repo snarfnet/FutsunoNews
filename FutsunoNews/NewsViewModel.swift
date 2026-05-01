@@ -5,6 +5,7 @@ class NewsViewModel: ObservableObject {
     @Published var sections: [(date: String, items: [NewsItem])] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    var totalCount: Int { sections.reduce(0) { $0 + $1.items.count } }
 
     private let apiURL = "https://backend-mu-one-z83zhj2wah.vercel.app/api/news?limit=100"
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import SafariServices
+import AVFoundation
 
 private let kTopBannerID    = "ca-app-pub-9404799280370656/9614494112"
 private let kBottomBannerID = "ca-app-pub-9404799280370656/1118636003"
@@ -21,17 +22,21 @@ enum FontSizeOption: String, CaseIterable {
 struct ContentView: View {
     @StateObject private var vm = NewsViewModel()
     @StateObject private var bookmarks = BookmarkManager()
+    @StateObject private var tts = TTSManager()
     @AppStorage("fontSize") private var fontSizeRaw: String = FontSizeOption.medium.rawValue
 
     private var fontSize: FontSizeOption { FontSizeOption(rawValue: fontSizeRaw) ?? .medium }
 
     var body: some View {
         TabView {
-            NewsListView(vm: vm, bookmarks: bookmarks, fontSize: fontSize, fontSizeRaw: $fontSizeRaw)
+            NewsListView(vm: vm, bookmarks: bookmarks, tts: tts, fontSize: fontSize, fontSizeRaw: $fontSizeRaw)
                 .tabItem { Label("ニュース", systemImage: "newspaper") }
 
-            BookmarksView(bookmarks: bookmarks, fontSize: fontSize)
+            BookmarksView(bookmarks: bookmarks, tts: tts, fontSize: fontSize)
                 .tabItem { Label("保存済み", systemImage: "bookmark.fill") }
+
+            StatsView(bookmarks: bookmarks, vm: vm)
+                .tabItem { Label("統計", systemImage: "chart.bar") }
         }
         .task { await vm.fetch() }
     }
@@ -40,8 +45,21 @@ struct ContentView: View {
 struct NewsListView: View {
     @ObservedObject var vm: NewsViewModel
     @ObservedObject var bookmarks: BookmarkManager
+    @ObservedObject var tts: TTSManager
     let fontSize: FontSizeOption
     @Binding var fontSizeRaw: String
+    @State private var searchText = ""
+
+    private var filteredSections: [(date: String, items: [NewsItem])] {
+        guard !searchText.isEmpty else { return vm.sections }
+        let q = searchText.lowercased()
+        return vm.sections.compactMap { section in
+            let filtered = section.items.filter {
+                $0.title.lowercased().contains(q) || $0.source.lowercased().contains(q)
+            }
+            return filtered.isEmpty ? nil : (date: section.date, items: filtered)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,14 +77,14 @@ struct NewsListView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List {
-                            ForEach(vm.sections, id: \.date) { section in
+                            ForEach(filteredSections, id: \.date) { section in
                                 Section(header: Text(section.date)
                                     .font(.caption)
                                     .fontWeight(.semibold)
                                     .foregroundStyle(.secondary)
                                 ) {
                                     ForEach(section.items) { item in
-                                        NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks)
+                                        NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
                                     }
                                 }
                             }
@@ -77,6 +95,7 @@ struct NewsListView: View {
                 }
                 .navigationTitle("普通のニュース")
                 .navigationBarTitleDisplayMode(.inline)
+                .searchable(text: $searchText, prompt: "記事を検索…")
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Picker("文字サイズ", selection: $fontSizeRaw) {
@@ -96,7 +115,15 @@ struct NewsListView: View {
 
 struct BookmarksView: View {
     @ObservedObject var bookmarks: BookmarkManager
+    @ObservedObject var tts: TTSManager
     let fontSize: FontSizeOption
+    @State private var searchText = ""
+
+    private var filteredBookmarks: [NewsItem] {
+        guard !searchText.isEmpty else { return bookmarks.bookmarks }
+        let q = searchText.lowercased()
+        return bookmarks.bookmarks.filter { $0.title.lowercased().contains(q) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -118,8 +145,13 @@ struct BookmarksView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
-                        ForEach(bookmarks.bookmarks) { item in
-                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks)
+                        ForEach(filteredBookmarks) { item in
+                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
+                        }
+                        .onDelete { indexSet in
+                            for i in indexSet {
+                                bookmarks.toggle(filteredBookmarks[i])
+                            }
                         }
                     }
                     .listStyle(.plain)
@@ -127,7 +159,80 @@ struct BookmarksView: View {
             }
             .navigationTitle("保存済み")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "保存記事を検索…")
         }
+    }
+}
+
+struct StatsView: View {
+    @ObservedObject var bookmarks: BookmarkManager
+    @ObservedObject var vm: NewsViewModel
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("閲覧データ") {
+                    HStack {
+                        Label("読んだ記事", systemImage: "eye")
+                        Spacer()
+                        Text("\(bookmarks.readIDs.count)件")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Label("ブックマーク", systemImage: "bookmark.fill")
+                        Spacer()
+                        Text("\(bookmarks.bookmarks.count)件")
+                            .foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Label("取得記事数", systemImage: "newspaper")
+                        Spacer()
+                        Text("\(vm.totalCount)件")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("よく読むメディア") {
+                    let sources = topSources()
+                    if sources.isEmpty {
+                        Text("記事を読むと統計が表示されます")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(sources, id: \.name) { source in
+                            HStack {
+                                Text(source.name)
+                                Spacer()
+                                Text("\(source.count)件")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+
+                Section("使い方ヒント") {
+                    Label("左にスワイプで記事を削除", systemImage: "hand.draw")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Label("スピーカーボタンで記事を読み上げ", systemImage: "speaker.wave.2")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Label("検索バーで記事をフィルタリング", systemImage: "magnifyingglass")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("統計")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private func topSources() -> [(name: String, count: Int)] {
+        let readItems = vm.sections.flatMap(\.items).filter { bookmarks.isRead($0.id) }
+        var counts: [String: Int] = [:]
+        for item in readItems { counts[item.source, default: 0] += 1 }
+        return counts.sorted { $0.value > $1.value }.prefix(5).map { (name: $0.key, count: $0.value) }
     }
 }
 
@@ -135,6 +240,8 @@ struct NewsRow: View {
     let item: NewsItem
     let fontSize: FontSizeOption
     @ObservedObject var bookmarks: BookmarkManager
+    @ObservedObject var tts: TTSManager
+    var searchText: String = ""
     @State private var showSafari = false
 
     var body: some View {
@@ -144,7 +251,7 @@ struct NewsRow: View {
                 showSafari = true
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
+                    Text(highlightedTitle)
                         .font(.system(
                             size: fontSize.titleSize,
                             weight: bookmarks.isRead(item.id) ? .regular : .semibold
@@ -164,6 +271,17 @@ struct NewsRow: View {
 
             HStack {
                 Spacer()
+                Button {
+                    tts.speak(item.title)
+                } label: {
+                    Image(systemName: tts.isSpeaking(item.title) ? "speaker.wave.3.fill" : "speaker.wave.2")
+                        .font(.caption)
+                        .foregroundStyle(tts.isSpeaking(item.title) ? .blue : .secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+
                 if let url = item.articleURL {
                     ShareLink(item: url) {
                         Image(systemName: "square.and.arrow.up")
@@ -191,6 +309,56 @@ struct NewsRow: View {
                 SafariView(url: url).ignoresSafeArea()
             }
         }
+    }
+
+    private var highlightedTitle: AttributedString {
+        var attr = AttributedString(item.title)
+        guard !searchText.isEmpty else { return attr }
+        let lower = item.title.lowercased()
+        let query = searchText.lowercased()
+        var start = lower.startIndex
+        while let range = lower.range(of: query, range: start..<lower.endIndex) {
+            let attrStart = AttributedString.Index(range.lowerBound, within: attr)!
+            let attrEnd = AttributedString.Index(range.upperBound, within: attr)!
+            attr[attrStart..<attrEnd].backgroundColor = .yellow.opacity(0.3)
+            start = range.upperBound
+        }
+        return attr
+    }
+}
+
+// MARK: - TTS Manager
+
+class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+    private let synthesizer = AVSpeechSynthesizer()
+    @Published private var currentText: String?
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    func speak(_ text: String) {
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+            if currentText == text {
+                currentText = nil
+                return
+            }
+        }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "ja-JP")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        currentText = text
+        synthesizer.speak(utterance)
+    }
+
+    func isSpeaking(_ text: String) -> Bool {
+        synthesizer.isSpeaking && currentText == text
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.currentText = nil }
     }
 }
 

@@ -4,22 +4,15 @@ import AppTrackingTransparency
 
 @main
 struct FutsunoNewsApp: App {
-    init() {
-        GADMobileAds.sharedInstance().start(completionHandler: nil)
-    }
-
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .onAppear {
-                    requestTrackingPermission()
+                    GADMobileAds.sharedInstance().start(completionHandler: nil)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        ATTrackingManager.requestTrackingAuthorization { _ in }
+                    }
                 }
-        }
-    }
-
-    private func requestTrackingPermission() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            ATTrackingManager.requestTrackingAuthorization { _ in }
         }
     }
 }
