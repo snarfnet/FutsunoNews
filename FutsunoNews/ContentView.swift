@@ -269,7 +269,7 @@ struct StatsView: View {
                             HStack(spacing: 8) {
                                 Image(systemName: trend.category.icon)
                                     .font(.caption)
-                                    .foregroundStyle(.accentColor)
+                                    .foregroundStyle(Color.accentColor)
                                     .frame(width: 20)
                                 Text(trend.category.rawValue)
                                     .font(.subheadline)
@@ -380,7 +380,7 @@ struct NewsRow: View {
                             .foregroundStyle(.tertiary)
                         Label(item.category.rawValue, systemImage: item.category.icon)
                             .font(.caption2)
-                            .foregroundStyle(.accentColor.opacity(0.8))
+                            .foregroundStyle(Color.accentColor.opacity(0.8))
                     }
                 }
                 .padding(.vertical, 4)
@@ -534,7 +534,7 @@ struct ArticleReaderView: View {
                                     Label("要約", systemImage: "text.redaction")
                                         .font(.caption)
                                         .fontWeight(.semibold)
-                                        .foregroundStyle(.accentColor)
+                                        .foregroundStyle(Color.accentColor)
                                     Text(summary)
                                         .font(.system(size: fontSize.titleSize))
                                         .lineSpacing(4)
