@@ -78,29 +78,78 @@ r = api('PATCH', f'/appStoreVersions/{version_id}/relationships/build',
     json={'data': {'type': 'builds', 'id': build_id}})
 print(f'Build assigned: {r.status_code}')
 
-# Submit via reviewSubmissions API
-r = api('POST', '/reviewSubmissions', json={
-    'data': {
-        'type': 'reviewSubmissions',
-        'relationships': {'app': {'data': {'type': 'apps', 'id': APP_ID}}}
-    }
-})
-if r.status_code != 201:
-    print(f'Create reviewSubmission failed: {r.status_code} {r.text[:300]}')
-    sys.exit(0)
-submission_id = r.json()['data']['id']
-print(f'ReviewSubmission created: {submission_id}')
+# Cancel any blocking reviewSubmissions
+canceled_any = False
+for state_filter in ['UNRESOLVED_ISSUES', 'READY_FOR_REVIEW']:
+    r = api('GET', f'/apps/{APP_ID}/reviewSubmissions?filter[state]={state_filter}')
+    if r.status_code == 200:
+        for sub in r.json().get('data', []):
+            sid = sub['id']
+            st = sub['attributes']['state']
+            cr = api('PATCH', f'/reviewSubmissions/{sid}', json={
+                'data': {'type': 'reviewSubmissions', 'id': sid, 'attributes': {'canceled': True}}
+            })
+            print(f'Cancel {sid} state={st}: {cr.status_code}')
+            canceled_any = True
 
-r = api('POST', '/reviewSubmissionItems', json={
-    'data': {
-        'type': 'reviewSubmissionItems',
-        'relationships': {
-            'reviewSubmission': {'data': {'type': 'reviewSubmissions', 'id': submission_id}},
-            'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': version_id}}
+if canceled_any:
+    print('Waiting 30s for cancellations to propagate...')
+    time.sleep(30)
+    # Re-fetch version state after cancellation
+    r = api('GET', f'/apps/{APP_ID}/appStoreVersions?filter[platform]=IOS&limit=1')
+    data = r.json()
+    if data.get('data'):
+        version_id = data['data'][0]['id']
+        version_state = data['data'][0]['attributes']['appStoreState']
+        print(f'Version after cancel: {version_id} state={version_state}')
+    # Re-assign build after cancel
+    r = api('PATCH', f'/appStoreVersions/{version_id}/relationships/build',
+        json={'data': {'type': 'builds', 'id': build_id}})
+    print(f'Build re-assigned: {r.status_code}')
+
+# Submit via reviewSubmissions API (with retry)
+submission_id = None
+for attempt in range(5):
+    r = api('POST', '/reviewSubmissions', json={
+        'data': {
+            'type': 'reviewSubmissions',
+            'relationships': {'app': {'data': {'type': 'apps', 'id': APP_ID}}}
         }
-    }
-})
-print(f'Add item: {r.status_code}')
+    })
+    if r.status_code == 201:
+        submission_id = r.json()['data']['id']
+        print(f'ReviewSubmission created: {submission_id}')
+        break
+    print(f'Create reviewSubmission attempt {attempt+1}/5 failed: {r.status_code} {r.text[:200]}')
+    if attempt < 4:
+        time.sleep(15)
+
+if not submission_id:
+    print('Could not create reviewSubmission after 5 attempts.')
+    sys.exit(0)
+
+# Add item with retry
+item_added = False
+for attempt in range(5):
+    r = api('POST', '/reviewSubmissionItems', json={
+        'data': {
+            'type': 'reviewSubmissionItems',
+            'relationships': {
+                'reviewSubmission': {'data': {'type': 'reviewSubmissions', 'id': submission_id}},
+                'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': version_id}}
+            }
+        }
+    })
+    print(f'Add item attempt {attempt+1}/5: {r.status_code}')
+    if r.status_code == 201:
+        item_added = True
+        break
+    if attempt < 4:
+        time.sleep(15)
+
+if not item_added:
+    print(f'Failed to add item: {r.text[:300]}')
+    sys.exit(0)
 
 r = api('PATCH', f'/reviewSubmissions/{submission_id}', json={
     'data': {
