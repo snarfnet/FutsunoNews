@@ -42,6 +42,8 @@ struct ContentView: View {
     }
 }
 
+// MARK: - News List
+
 struct NewsListView: View {
     @ObservedObject var vm: NewsViewModel
     @ObservedObject var bookmarks: BookmarkManager
@@ -49,11 +51,19 @@ struct NewsListView: View {
     let fontSize: FontSizeOption
     @Binding var fontSizeRaw: String
     @State private var searchText = ""
+    @State private var selectedCategory: NewsCategory? = nil
 
     private var filteredSections: [(date: String, items: [NewsItem])] {
-        guard !searchText.isEmpty else { return vm.sections }
+        var base = vm.sections
+        if let cat = selectedCategory {
+            base = base.compactMap { section in
+                let filtered = section.items.filter { $0.category == cat }
+                return filtered.isEmpty ? nil : (date: section.date, items: filtered)
+            }
+        }
+        guard !searchText.isEmpty else { return base }
         let q = searchText.lowercased()
-        return vm.sections.compactMap { section in
+        return base.compactMap { section in
             let filtered = section.items.filter {
                 $0.title.lowercased().contains(q) || $0.source.lowercased().contains(q)
             }
@@ -76,21 +86,24 @@ struct NewsListView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List {
-                            ForEach(filteredSections, id: \.date) { section in
-                                Section(header: Text(section.date)
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.secondary)
-                                ) {
-                                    ForEach(section.items) { item in
-                                        NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
+                        VStack(spacing: 0) {
+                            CategoryFilterBar(selected: $selectedCategory)
+                            List {
+                                ForEach(filteredSections, id: \.date) { section in
+                                    Section(header: Text(section.date)
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.secondary)
+                                    ) {
+                                        ForEach(section.items) { item in
+                                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
+                                        }
                                     }
                                 }
                             }
+                            .listStyle(.plain)
+                            .refreshable { await vm.fetch() }
                         }
-                        .listStyle(.plain)
-                        .refreshable { await vm.fetch() }
                     }
                 }
                 .navigationTitle("普通のニュース")
@@ -112,6 +125,57 @@ struct NewsListView: View {
         }
     }
 }
+
+// MARK: - Category Filter Bar
+
+struct CategoryFilterBar: View {
+    @Binding var selected: NewsCategory?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                FilterChip(label: "すべて", icon: "list.bullet", isSelected: selected == nil) {
+                    selected = nil
+                }
+                ForEach(NewsCategory.allCases, id: \.self) { cat in
+                    FilterChip(label: cat.rawValue, icon: cat.icon, isSelected: selected == cat) {
+                        selected = (selected == cat) ? nil : cat
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
+struct FilterChip: View {
+    let label: String
+    let icon: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption2)
+                Text(label)
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(isSelected ? Color.accentColor : Color(.secondarySystemFill))
+            .foregroundStyle(isSelected ? .white : .primary)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Bookmarks
 
 struct BookmarksView: View {
     @ObservedObject var bookmarks: BookmarkManager
@@ -164,6 +228,8 @@ struct BookmarksView: View {
     }
 }
 
+// MARK: - Stats
+
 struct StatsView: View {
     @ObservedObject var bookmarks: BookmarkManager
     @ObservedObject var vm: NewsViewModel
@@ -192,6 +258,38 @@ struct StatsView: View {
                     }
                 }
 
+                Section("カテゴリ別の閲覧傾向") {
+                    let trends = categoryTrends()
+                    if trends.isEmpty {
+                        Text("記事を読むとカテゴリ別の傾向が表示されます")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(trends, id: \.category) { trend in
+                            HStack(spacing: 8) {
+                                Image(systemName: trend.category.icon)
+                                    .font(.caption)
+                                    .foregroundStyle(.accentColor)
+                                    .frame(width: 20)
+                                Text(trend.category.rawValue)
+                                    .font(.subheadline)
+                                Spacer()
+                                GeometryReader { geo in
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.accentColor.opacity(0.6))
+                                        .frame(width: geo.size.width * trend.ratio, height: 14)
+                                        .frame(maxWidth: .infinity, alignment: .trailing)
+                                }
+                                .frame(width: 80, height: 14)
+                                Text("\(trend.count)件")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 36, alignment: .trailing)
+                            }
+                        }
+                    }
+                }
+
                 Section("よく読むメディア") {
                     let sources = topSources()
                     if sources.isEmpty {
@@ -212,10 +310,13 @@ struct StatsView: View {
                 }
 
                 Section("使い方ヒント") {
-                    Label("左にスワイプで記事を削除", systemImage: "hand.draw")
+                    Label("カテゴリバーで記事を絞り込み", systemImage: "line.3.horizontal.decrease.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Label("スピーカーボタンで記事を読み上げ", systemImage: "speaker.wave.2")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Label("記事詳細で要約を自動生成", systemImage: "text.redaction")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Label("検索バーで記事をフィルタリング", systemImage: "magnifyingglass")
@@ -234,7 +335,18 @@ struct StatsView: View {
         for item in readItems { counts[item.source, default: 0] += 1 }
         return counts.sorted { $0.value > $1.value }.prefix(5).map { (name: $0.key, count: $0.value) }
     }
+
+    private func categoryTrends() -> [(category: NewsCategory, count: Int, ratio: CGFloat)] {
+        let readItems = vm.sections.flatMap(\.items).filter { bookmarks.isRead($0.id) }
+        var counts: [NewsCategory: Int] = [:]
+        for item in readItems { counts[item.category, default: 0] += 1 }
+        let sorted = counts.sorted { $0.value > $1.value }
+        let maxCount = sorted.first?.value ?? 1
+        return sorted.map { (category: $0.key, count: $0.value, ratio: CGFloat($0.value) / CGFloat(maxCount)) }
+    }
 }
+
+// MARK: - News Row
 
 struct NewsRow: View {
     let item: NewsItem
@@ -259,9 +371,17 @@ struct NewsRow: View {
                         .foregroundStyle(bookmarks.isRead(item.id) ? .secondary : .primary)
                         .multilineTextAlignment(.leading)
                         .lineLimit(3)
-                    Text(item.source)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(item.source)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text("·")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Label(item.category.rawValue, systemImage: item.category.icon)
+                            .font(.caption2)
+                            .foregroundStyle(.accentColor.opacity(0.8))
+                    }
                 }
                 .padding(.vertical, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -336,6 +456,12 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("AVAudioSession setup failed: \(error)")
+        }
     }
 
     func speak(_ text: String) {
@@ -362,7 +488,7 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-// MARK: - In-App Article Reader
+// MARK: - Article Reader with Summary
 
 struct ArticleReaderView: View {
     let url: URL
@@ -372,6 +498,7 @@ struct ArticleReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var loader = ArticleLoader()
     @State private var showWebFallback = false
+    @State private var showSummary = false
 
     var body: some View {
         NavigationStack {
@@ -391,10 +518,31 @@ struct ArticleReaderView: View {
                                 .font(.system(size: fontSize.titleSize + 6, weight: .bold))
                                 .padding(.bottom, 4)
 
-                            if let source = url.host {
-                                Text(source)
+                            HStack(spacing: 12) {
+                                if let source = url.host {
+                                    Text(source)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Label(readingTime(article), systemImage: "clock")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                            }
+
+                            if showSummary, let summary = loader.summary {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("要約", systemImage: "text.redaction")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.accentColor)
+                                    Text(summary)
+                                        .font(.system(size: fontSize.titleSize))
+                                        .lineSpacing(4)
+                                        .foregroundStyle(.primary.opacity(0.9))
+                                }
+                                .padding()
+                                .background(Color.accentColor.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
                             }
 
                             Divider()
@@ -417,9 +565,18 @@ struct ArticleReaderView: View {
                     Button("閉じる") { dismiss() }
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if loader.summary != nil {
+                        Button {
+                            showSummary.toggle()
+                        } label: {
+                            Image(systemName: showSummary ? "text.redaction" : "text.alignleft")
+                                .foregroundStyle(showSummary ? .accentColor : .primary)
+                        }
+                    }
+
                     Button {
                         if let text = loader.articleText, !text.isEmpty {
-                            tts.speak(text)
+                            tts.speak(showSummary && loader.summary != nil ? loader.summary! : text)
                         } else {
                             tts.speak(title)
                         }
@@ -449,12 +606,21 @@ struct ArticleReaderView: View {
         }
         .task { await loader.load(url: url) }
     }
+
+    private func readingTime(_ text: String) -> String {
+        let charCount = text.count
+        let minutes = max(1, charCount / 500)
+        return "約\(minutes)分"
+    }
 }
+
+// MARK: - Article Loader with Summary
 
 @MainActor
 class ArticleLoader: ObservableObject {
     @Published var isLoading = true
     @Published var articleText: String?
+    @Published var summary: String?
 
     func load(url: URL) async {
         isLoading = true
@@ -465,17 +631,47 @@ class ArticleLoader: ObservableObject {
             guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS) else {
                 return
             }
-            articleText = extractText(from: html)
+            let text = extractText(from: html)
+            articleText = text
+            if let text = text, text.count > 100 {
+                summary = generateSummary(from: text)
+            }
         } catch {
             articleText = nil
         }
     }
 
-    private func extractText(from html: String) -> String? {
-        let tagSelectors = ["article", "main", ".article-body", ".entry-content", "#article-body", ".post-content", ".story-body"]
-        var best: String?
+    private func generateSummary(from text: String) -> String? {
+        let sentences = text.components(separatedBy: CharacterSet(charactersIn: "。！？\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count > 10 }
 
-        // Try to find article content by looking for common content markers
+        guard sentences.count >= 2 else { return nil }
+
+        // Score sentences by position and length
+        var scored: [(sentence: String, score: Double)] = []
+        for (i, s) in sentences.enumerated() {
+            var score = 0.0
+            // First sentences are more important
+            if i == 0 { score += 3.0 }
+            else if i == 1 { score += 2.0 }
+            else if i < 4 { score += 1.0 }
+            // Prefer medium-length sentences
+            if s.count > 20 && s.count < 150 { score += 1.0 }
+            // Sentences with numbers often contain key facts
+            if s.range(of: "\\d", options: .regularExpression) != nil { score += 0.5 }
+            scored.append((sentence: s, score: score))
+        }
+
+        let top = scored.sorted { $0.score > $1.score }
+            .prefix(3)
+            .sorted { sentences.firstIndex(of: $0.sentence)! < sentences.firstIndex(of: $1.sentence)! }
+
+        let result = top.map { $0.sentence + "。" }.joined(separator: "")
+        return result.isEmpty ? nil : result
+    }
+
+    private func extractText(from html: String) -> String? {
         let stripped = html
             .replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression)
             .replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression)
@@ -484,7 +680,8 @@ class ArticleLoader: ObservableObject {
             .replacingOccurrences(of: "<footer[^>]*>[\\s\\S]*?</footer>", with: "", options: .regularExpression)
             .replacingOccurrences(of: "<aside[^>]*>[\\s\\S]*?</aside>", with: "", options: .regularExpression)
 
-        // Try to extract <article> or <main> tag content
+        var best: String?
+
         for tag in ["article", "main"] {
             if let range = stripped.range(of: "<\(tag)[^>]*>([\\s\\S]*?)</\(tag)>", options: .regularExpression) {
                 let content = String(stripped[range])
@@ -496,7 +693,6 @@ class ArticleLoader: ObservableObject {
             }
         }
 
-        // Fallback: extract <p> tags from body
         if best == nil {
             let paragraphs = extractParagraphs(from: stripped)
             let joined = paragraphs.joined(separator: "\n\n")
