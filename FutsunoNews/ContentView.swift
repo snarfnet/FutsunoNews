@@ -1,5 +1,5 @@
 import SwiftUI
-import SafariServices
+import WebKit
 import AVFoundation
 
 private let kTopBannerID    = "ca-app-pub-9404799280370656/9614494112"
@@ -242,13 +242,13 @@ struct NewsRow: View {
     @ObservedObject var bookmarks: BookmarkManager
     @ObservedObject var tts: TTSManager
     var searchText: String = ""
-    @State private var showSafari = false
+    @State private var showReader = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Button {
                 bookmarks.markRead(item.id)
-                showSafari = true
+                showReader = true
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(highlightedTitle)
@@ -304,9 +304,9 @@ struct NewsRow: View {
                 .buttonStyle(.plain)
             }
         }
-        .sheet(isPresented: $showSafari) {
+        .sheet(isPresented: $showReader) {
             if let url = item.articleURL {
-                SafariView(url: url).ignoresSafeArea()
+                ArticleReaderView(url: url, title: item.title, fontSize: fontSize, tts: tts)
             }
         }
     }
@@ -362,10 +362,196 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-struct SafariView: UIViewControllerRepresentable {
+// MARK: - In-App Article Reader
+
+struct ArticleReaderView: View {
     let url: URL
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
+    let title: String
+    let fontSize: FontSizeOption
+    @ObservedObject var tts: TTSManager
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var loader = ArticleLoader()
+    @State private var showWebFallback = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if loader.isLoading {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text("記事を読み込み中…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let article = loader.articleText, !article.isEmpty, !showWebFallback {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(title)
+                                .font(.system(size: fontSize.titleSize + 6, weight: .bold))
+                                .padding(.bottom, 4)
+
+                            if let source = url.host {
+                                Text(source)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Divider()
+
+                            Text(article)
+                                .font(.system(size: fontSize.titleSize + 2))
+                                .lineSpacing(6)
+                        }
+                        .padding()
+                    }
+                } else {
+                    ArticleWebView(url: url)
+                        .ignoresSafeArea(edges: .bottom)
+                }
+            }
+            .navigationTitle("記事")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("閉じる") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        if let text = loader.articleText, !text.isEmpty {
+                            tts.speak(text)
+                        } else {
+                            tts.speak(title)
+                        }
+                    } label: {
+                        Image(systemName: tts.isSpeaking(loader.articleText ?? title) ? "speaker.wave.3.fill" : "speaker.wave.2")
+                    }
+
+                    if loader.articleText != nil && !showWebFallback {
+                        Button {
+                            showWebFallback = true
+                        } label: {
+                            Image(systemName: "globe")
+                        }
+                    } else if showWebFallback {
+                        Button {
+                            showWebFallback = false
+                        } label: {
+                            Image(systemName: "doc.text")
+                        }
+                    }
+
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+            }
+        }
+        .task { await loader.load(url: url) }
     }
-    func updateUIViewController(_ vc: SFSafariViewController, context: Context) {}
+}
+
+@MainActor
+class ArticleLoader: ObservableObject {
+    @Published var isLoading = true
+    @Published var articleText: String?
+
+    func load(url: URL) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS) else {
+                return
+            }
+            articleText = extractText(from: html)
+        } catch {
+            articleText = nil
+        }
+    }
+
+    private func extractText(from html: String) -> String? {
+        let tagSelectors = ["article", "main", ".article-body", ".entry-content", "#article-body", ".post-content", ".story-body"]
+        var best: String?
+
+        // Try to find article content by looking for common content markers
+        let stripped = html
+            .replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<nav[^>]*>[\\s\\S]*?</nav>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<header[^>]*>[\\s\\S]*?</header>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<footer[^>]*>[\\s\\S]*?</footer>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<aside[^>]*>[\\s\\S]*?</aside>", with: "", options: .regularExpression)
+
+        // Try to extract <article> or <main> tag content
+        for tag in ["article", "main"] {
+            if let range = stripped.range(of: "<\(tag)[^>]*>([\\s\\S]*?)</\(tag)>", options: .regularExpression) {
+                let content = String(stripped[range])
+                let text = htmlToPlainText(content)
+                if text.count > 100 {
+                    best = text
+                    break
+                }
+            }
+        }
+
+        // Fallback: extract <p> tags from body
+        if best == nil {
+            let paragraphs = extractParagraphs(from: stripped)
+            let joined = paragraphs.joined(separator: "\n\n")
+            if joined.count > 80 {
+                best = joined
+            }
+        }
+
+        return best
+    }
+
+    private func extractParagraphs(from html: String) -> [String] {
+        var results: [String] = []
+        let pattern = "<p[^>]*>(.*?)</p>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]) else {
+            return results
+        }
+        let nsString = html as NSString
+        let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsString.length))
+        for match in matches {
+            if match.numberOfRanges > 1 {
+                let content = nsString.substring(with: match.range(at: 1))
+                let text = htmlToPlainText(content).trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.count > 20 {
+                    results.append(text)
+                }
+            }
+        }
+        return results
+    }
+
+    private func htmlToPlainText(_ html: String) -> String {
+        html
+            .replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "\\s*\\n\\s*\\n\\s*", with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct ArticleWebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
