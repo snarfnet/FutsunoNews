@@ -570,7 +570,7 @@ struct ArticleReaderView: View {
                             showSummary.toggle()
                         } label: {
                             Image(systemName: showSummary ? "text.redaction" : "text.alignleft")
-                                .foregroundStyle(showSummary ? .accentColor : .primary)
+                                .foregroundStyle(showSummary ? Color.accentColor : Color.primary)
                         }
                     }
 
