@@ -23,19 +23,25 @@ struct ContentView: View {
     @StateObject private var vm = NewsViewModel()
     @StateObject private var bookmarks = BookmarkManager()
     @StateObject private var tts = TTSManager()
+    @StateObject private var offlineCache = OfflineCache.shared
+    @StateObject private var noteManager = NoteManager.shared
+    @StateObject private var readingHistory = ReadingHistory.shared
     @AppStorage("fontSize") private var fontSizeRaw: String = FontSizeOption.medium.rawValue
 
     private var fontSize: FontSizeOption { FontSizeOption(rawValue: fontSizeRaw) ?? .medium }
 
     var body: some View {
         TabView {
-            NewsListView(vm: vm, bookmarks: bookmarks, tts: tts, fontSize: fontSize, fontSizeRaw: $fontSizeRaw)
+            NewsListView(vm: vm, bookmarks: bookmarks, tts: tts, fontSize: fontSize, fontSizeRaw: $fontSizeRaw, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
                 .tabItem { Label("ニュース", systemImage: "newspaper") }
 
-            BookmarksView(bookmarks: bookmarks, tts: tts, fontSize: fontSize)
+            BookmarksView(bookmarks: bookmarks, tts: tts, fontSize: fontSize, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
                 .tabItem { Label("保存済み", systemImage: "bookmark.fill") }
 
-            StatsView(bookmarks: bookmarks, vm: vm)
+            DigestView(readingHistory: readingHistory, vm: vm, bookmarks: bookmarks)
+                .tabItem { Label("まとめ", systemImage: "doc.text.image") }
+
+            StatsView(bookmarks: bookmarks, vm: vm, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
                 .tabItem { Label("統計", systemImage: "chart.bar") }
         }
         .task { await vm.fetch() }
@@ -50,6 +56,9 @@ struct NewsListView: View {
     @ObservedObject var tts: TTSManager
     let fontSize: FontSizeOption
     @Binding var fontSizeRaw: String
+    @ObservedObject var offlineCache: OfflineCache
+    @ObservedObject var noteManager: NoteManager
+    @ObservedObject var readingHistory: ReadingHistory
     @State private var searchText = ""
     @State private var selectedCategory: NewsCategory? = nil
 
@@ -96,7 +105,7 @@ struct NewsListView: View {
                                         .foregroundStyle(.secondary)
                                     ) {
                                         ForEach(section.items) { item in
-                                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
+                                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
                                         }
                                     }
                                 }
@@ -181,6 +190,9 @@ struct BookmarksView: View {
     @ObservedObject var bookmarks: BookmarkManager
     @ObservedObject var tts: TTSManager
     let fontSize: FontSizeOption
+    @ObservedObject var offlineCache: OfflineCache
+    @ObservedObject var noteManager: NoteManager
+    @ObservedObject var readingHistory: ReadingHistory
     @State private var searchText = ""
 
     private var filteredBookmarks: [NewsItem] {
@@ -210,7 +222,7 @@ struct BookmarksView: View {
                 } else {
                     List {
                         ForEach(filteredBookmarks) { item in
-                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText)
+                            NewsRow(item: item, fontSize: fontSize, bookmarks: bookmarks, tts: tts, searchText: searchText, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
                         }
                         .onDelete { indexSet in
                             for i in indexSet {
@@ -233,6 +245,9 @@ struct BookmarksView: View {
 struct StatsView: View {
     @ObservedObject var bookmarks: BookmarkManager
     @ObservedObject var vm: NewsViewModel
+    @ObservedObject var offlineCache: OfflineCache
+    @ObservedObject var noteManager: NoteManager
+    @ObservedObject var readingHistory: ReadingHistory
 
     var body: some View {
         NavigationStack {
@@ -255,6 +270,40 @@ struct StatsView: View {
                         Spacer()
                         Text("\(vm.totalCount)件")
                             .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Label("オフライン保存", systemImage: "arrow.down.circle.fill")
+                        Spacer()
+                        Text("\(offlineCache.cachedCount)件")
+                            .foregroundStyle(.green)
+                    }
+                    HStack {
+                        Label("メモ", systemImage: "note.text")
+                        Spacer()
+                        Text("\(noteManager.noteCount)件")
+                            .foregroundStyle(.purple)
+                    }
+                }
+
+                Section("閲覧履歴") {
+                    HStack {
+                        Label("今日読んだ記事", systemImage: "clock")
+                        Spacer()
+                        Text("\(readingHistory.todayEntries().count)件")
+                            .foregroundStyle(.blue)
+                    }
+                    HStack {
+                        Label("今週読んだ記事", systemImage: "calendar")
+                        Spacer()
+                        Text("\(readingHistory.thisWeekEntries().count)件")
+                            .foregroundStyle(.blue)
+                    }
+                    if !readingHistory.entries.isEmpty {
+                        Button(role: .destructive) {
+                            readingHistory.clearHistory()
+                        } label: {
+                            Label("履歴をクリア", systemImage: "trash")
+                        }
                     }
                 }
 
@@ -354,12 +403,19 @@ struct NewsRow: View {
     @ObservedObject var bookmarks: BookmarkManager
     @ObservedObject var tts: TTSManager
     var searchText: String = ""
+    @ObservedObject var offlineCache: OfflineCache
+    @ObservedObject var noteManager: NoteManager
+    @ObservedObject var readingHistory: ReadingHistory
     @State private var showReader = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Button {
                 bookmarks.markRead(item.id)
+                readingHistory.addEntry(
+                    articleId: item.id, title: item.title,
+                    source: item.source, category: item.category.rawValue
+                )
                 showReader = true
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
@@ -381,6 +437,16 @@ struct NewsRow: View {
                         Label(item.category.rawValue, systemImage: item.category.icon)
                             .font(.caption2)
                             .foregroundStyle(Color.accentColor.opacity(0.8))
+                        if offlineCache.isCached(item.id) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                        }
+                        if noteManager.hasNote(item.id) {
+                            Image(systemName: "note.text")
+                                .font(.caption2)
+                                .foregroundStyle(.purple)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -426,7 +492,7 @@ struct NewsRow: View {
         }
         .sheet(isPresented: $showReader) {
             if let url = item.articleURL {
-                ArticleReaderView(url: url, title: item.title, fontSize: fontSize, tts: tts)
+                ArticleReaderView(url: url, title: item.title, articleId: item.id, source: item.source, category: item.category.rawValue, fontSize: fontSize, tts: tts, offlineCache: offlineCache, noteManager: noteManager, readingHistory: readingHistory)
             }
         }
     }
@@ -493,12 +559,20 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 struct ArticleReaderView: View {
     let url: URL
     let title: String
+    var articleId: String = ""
+    var source: String = ""
+    var category: String = ""
     let fontSize: FontSizeOption
     @ObservedObject var tts: TTSManager
+    @ObservedObject var offlineCache: OfflineCache
+    @ObservedObject var noteManager: NoteManager
+    @ObservedObject var readingHistory: ReadingHistory
     @Environment(\.dismiss) private var dismiss
     @StateObject private var loader = ArticleLoader()
     @State private var showWebFallback = false
     @State private var showSummary = false
+    @State private var showNoteEditor = false
+    @State private var noteText = ""
 
     var body: some View {
         NavigationStack {
@@ -545,6 +619,26 @@ struct ArticleReaderView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 10))
                             }
 
+                            // Note display
+                            if noteManager.hasNote(articleId) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("メモ", systemImage: "note.text")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.purple)
+                                    Text(noteManager.getNote(articleId))
+                                        .font(.system(size: fontSize.titleSize))
+                                        .lineSpacing(4)
+                                }
+                                .padding()
+                                .background(Color.purple.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .onTapGesture {
+                                    noteText = noteManager.getNote(articleId)
+                                    showNoteEditor = true
+                                }
+                            }
+
                             Divider()
 
                             Text(article)
@@ -572,6 +666,27 @@ struct ArticleReaderView: View {
                             Image(systemName: showSummary ? "text.redaction" : "text.alignleft")
                                 .foregroundStyle(showSummary ? Color.accentColor : Color.primary)
                         }
+                    }
+
+                    // Note button
+                    Button {
+                        noteText = noteManager.getNote(articleId)
+                        showNoteEditor = true
+                    } label: {
+                        Image(systemName: noteManager.hasNote(articleId) ? "note.text" : "note.text.badge.plus")
+                            .foregroundStyle(noteManager.hasNote(articleId) ? .purple : .primary)
+                    }
+
+                    // Offline cache button
+                    Button {
+                        if offlineCache.isCached(articleId) {
+                            offlineCache.removeCache(articleId)
+                        } else if let text = loader.articleText {
+                            offlineCache.cache(id: articleId, title: title, source: source, text: text, summary: loader.summary)
+                        }
+                    } label: {
+                        Image(systemName: offlineCache.isCached(articleId) ? "arrow.down.circle.fill" : "arrow.down.circle")
+                            .foregroundStyle(offlineCache.isCached(articleId) ? .green : .primary)
                     }
 
                     Button {
@@ -603,14 +718,167 @@ struct ArticleReaderView: View {
                     }
                 }
             }
+            .sheet(isPresented: $showNoteEditor) {
+                NoteEditorView(articleId: articleId, noteText: $noteText, noteManager: noteManager)
+            }
         }
-        .task { await loader.load(url: url) }
+        .task {
+            await loader.load(url: url)
+            // Auto-cache article text when loaded
+            if let text = loader.articleText, !text.isEmpty, !articleId.isEmpty {
+                offlineCache.cache(id: articleId, title: title, source: source, text: text, summary: loader.summary)
+            }
+        }
     }
 
     private func readingTime(_ text: String) -> String {
         let charCount = text.count
         let minutes = max(1, charCount / 500)
         return "約\(minutes)分"
+    }
+}
+
+// MARK: - Note Editor
+
+struct NoteEditorView: View {
+    let articleId: String
+    @Binding var noteText: String
+    @ObservedObject var noteManager: NoteManager
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                TextEditor(text: $noteText)
+                    .padding()
+                    .overlay(
+                        Group {
+                            if noteText.isEmpty {
+                                Text("この記事についてメモを書く…")
+                                    .foregroundStyle(.tertiary)
+                                    .padding(20)
+                                    .allowsHitTesting(false)
+                            }
+                        },
+                        alignment: .topLeading
+                    )
+            }
+            .navigationTitle("メモ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("キャンセル") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("保存") {
+                        noteManager.saveNote(articleId, text: noteText)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Daily Digest
+
+struct DigestView: View {
+    @ObservedObject var readingHistory: ReadingHistory
+    @ObservedObject var vm: NewsViewModel
+    @ObservedObject var bookmarks: BookmarkManager
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("今日の閲覧") {
+                    let today = readingHistory.todayEntries()
+                    if today.isEmpty {
+                        Text("今日はまだ記事を読んでいません")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(today) { entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.title)
+                                    .font(.subheadline)
+                                    .lineLimit(2)
+                                HStack(spacing: 6) {
+                                    Text(entry.source)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text("·")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                    Text(entry.category)
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.accentColor)
+                                    Spacer()
+                                    Text(entry.readAt, style: .time)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+
+                Section("今日のカテゴリ傾向") {
+                    let today = readingHistory.todayEntries()
+                    let catCounts = Dictionary(grouping: today, by: \.category)
+                        .mapValues(\.count)
+                        .sorted { $0.value > $1.value }
+                    if catCounts.isEmpty {
+                        Text("記事を読むと傾向が表示されます")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(catCounts, id: \.key) { cat, count in
+                            HStack {
+                                Text(cat)
+                                    .font(.subheadline)
+                                Spacer()
+                                Text("\(count)件")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                Section("未読のおすすめ") {
+                    let unread = vm.sections.flatMap(\.items)
+                        .filter { !bookmarks.isRead($0.id) }
+                        .prefix(5)
+                    if unread.isEmpty {
+                        Text("すべて既読です！")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(unread)) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .lineLimit(2)
+                                HStack(spacing: 6) {
+                                    Text(item.source)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Label(item.category.rawValue, systemImage: item.category.icon)
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.accentColor.opacity(0.8))
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("今日のまとめ")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 }
 
