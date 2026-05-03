@@ -857,27 +857,58 @@ struct DigestView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(Array(unread)) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.title)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                    .lineLimit(2)
-                                HStack(spacing: 6) {
-                                    Text(item.source)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Label(item.category.rawValue, systemImage: item.category.icon)
-                                        .font(.caption2)
-                                        .foregroundStyle(Color.accentColor.opacity(0.8))
-                                }
-                            }
-                            .padding(.vertical, 2)
+                            UnreadRecommendationRow(item: item, bookmarks: bookmarks, readingHistory: readingHistory)
                         }
                     }
                 }
             }
             .navigationTitle("今日のまとめ")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+// MARK: - Unread Recommendation Row
+
+struct UnreadRecommendationRow: View {
+    let item: NewsItem
+    @ObservedObject var bookmarks: BookmarkManager
+    @ObservedObject var readingHistory: ReadingHistory
+    @State private var showReader = false
+
+    var body: some View {
+        Button {
+            bookmarks.markRead(item.id)
+            readingHistory.addEntry(
+                articleId: item.id, title: item.title,
+                source: item.source, category: item.category.rawValue
+            )
+            showReader = true
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(2)
+                    .foregroundStyle(.primary)
+                HStack(spacing: 6) {
+                    Text(item.source)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Label(item.category.rawValue, systemImage: item.category.icon)
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor.opacity(0.8))
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showReader) {
+            if let url = item.articleURL {
+                ArticleReaderView(url: url, title: item.title, articleId: item.id, source: item.source, category: item.category.rawValue, fontSize: .medium, tts: TTSManager(), offlineCache: OfflineCache.shared, noteManager: NoteManager.shared, readingHistory: readingHistory)
+            }
         }
     }
 }
